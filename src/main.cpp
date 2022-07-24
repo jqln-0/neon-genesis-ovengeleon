@@ -606,12 +606,12 @@ void bottom_right_pushed() {
 }
 
 void change_state(State new_state) {
+	current_state = new_state;
+
 	display.fillScreen(ST77XX_BLACK);
 	draw_header();
 	draw_footer();
 	text_bg_color = 0x0000;
-
-	current_state = new_state;
 
 	// Any menu would want to be reset anyway.
 	last_drawn_selection = -1;
