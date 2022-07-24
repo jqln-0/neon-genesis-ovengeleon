@@ -17,8 +17,8 @@
 #define DISPLAY_BACKLIGHT_EN (20)
 
 #define BUTTON_TOP_LEFT (12)
-#define BUTTON_TOP_RIGHT (13)
-#define BUTTON_BOTTOM_LEFT (14)
+#define BUTTON_TOP_RIGHT (14)
+#define BUTTON_BOTTOM_LEFT (13)
 #define BUTTON_BOTTOM_RIGHT (15)
 
 #define BUZZER (26)
@@ -37,6 +37,9 @@ using std::ostringstream;
 
 Adafruit_ST7789 display = Adafruit_ST7789(DISPLAY_CS, DISPLAY_DC, DISPLAY_MOSI, DISPLAY_SCLK);
 
+// Drawing
+uint16_t text_bg_color = 0x0000;
+
 // State machine
 enum State {
 	MAIN_MENU,
@@ -49,7 +52,7 @@ enum State {
 	FINISHED_CALIBRATE
 };
 State current_state = MAIN_MENU;
-bool has_state_changed = false;
+State next_state = MAIN_MENU;
 
 // Temperature
 int current_temp = -1;
@@ -99,19 +102,21 @@ void justified_text(const string& text, int x, int y, Justification j) {
 	if (j == CENTER) x -= w / 2;
 	if (j == RIGHT) x -= w;
 
-	display.fillRect(x, y, w, h, 0x0000);
+	display.fillRect(x, y, w, h, text_bg_color);
 	display.setCursor(x, y);
 	display.print(text.c_str());
 }
 
 string get_time_string(unsigned long millis) {
 	ostringstream str;
-	str << std::setfill('0') << std::setw(2);
-	str << millis / 1000 / 60 << ":" << millis / 1000 % 60;
+	str << std::setfill('0') << std::setw(2) << millis / 1000 / 60;
+	str << ":";
+	str << std::setfill('0') << std::setw(2) << millis / 1000 % 60;
 	return str.str();
 }
 
 void draw_temperature() {
+	display.setTextSize(1);
 	string temp_sign = "";
 	if (current_temp != -1 && last_temp != -1) {
 		if (current_temp > last_temp) temp_sign = "+++";
@@ -121,7 +126,7 @@ void draw_temperature() {
 	ostringstream temp_string;
 	temp_string << "TEMP: ";
 	if (current_temp == -1) temp_string << "???";
-	else temp_string << "???";
+	else temp_string << current_temp;
 	temp_string << "C " << temp_sign;
 	string text = temp_string.str();
 
@@ -138,11 +143,12 @@ void draw_temperature() {
 }
 
 void draw_header() {
-	uint16_t colour_fg = ST77XX_WHITE;
-	uint16_t colour_bg = current_temp_color;
+	uint16_t color_fg = ST77XX_WHITE;
+	uint16_t color_bg = current_temp_color;
+	text_bg_color = color_bg;
 
-	display.fillRect(0, 0, 320, HEADER_FOOTER_SIZE, colour_bg);
-	display.setTextColor(colour_fg);
+	display.fillRect(0, 0, 320, HEADER_FOOTER_SIZE, color_bg);
+	display.setTextColor(color_fg);
 	display.setTextSize(1);
 
 	string l_action = "";
@@ -158,8 +164,7 @@ void draw_header() {
 		default:
 			break;
 	}
-	display.setCursor(0, 2);
-	display.print(l_action.c_str());
+	justified_text(l_action, 0, 2, LEFT);
 
 	string title = "";
 	switch (current_state) {
@@ -200,11 +205,12 @@ void draw_header() {
 }
 
 void draw_footer() {
-	uint16_t colour_fg = ST77XX_WHITE;
-	uint16_t colour_bg = current_temp_color;
+	uint16_t color_fg = ST77XX_WHITE;
+	uint16_t color_bg = current_temp_color;
+	text_bg_color = color_bg;
 
-	display.fillRect(0, 240 - HEADER_FOOTER_SIZE, 320, HEADER_FOOTER_SIZE, colour_bg);
-	display.setTextColor(colour_fg);
+	display.fillRect(0, 240 - HEADER_FOOTER_SIZE, 320, HEADER_FOOTER_SIZE, color_bg);
+	display.setTextColor(color_fg);
 	display.setTextSize(1);
 
 	string l_action = "";
@@ -221,8 +227,7 @@ void draw_footer() {
 		default:
 			break;
 	}
-	display.setCursor(0, 240 - HEADER_FOOTER_SIZE + 2);
-	display.print(l_action.c_str());
+	justified_text(l_action, 0, 240 - HEADER_FOOTER_SIZE + 2, LEFT);
 
 	string r_action = "";
 	switch (current_state) {
@@ -256,6 +261,7 @@ void change_state(State new_state) {
 	display.fillScreen(ST77XX_BLACK);
 	draw_header();
 	draw_footer();
+	text_bg_color = 0x0000;
 
 	current_state = new_state;
 	last_drawn_selection = -1;
@@ -268,6 +274,7 @@ void change_state(State new_state) {
 			display.setTextSize(1);
 			display.setCursor(0, 50);
 			display.print("NEON\nGENESIS\nOVENGELION");
+			display.setFont();
 			num_items = 2;
 			break;
 		case PICK_PROFILE:
@@ -275,6 +282,7 @@ void change_state(State new_state) {
 			num_items = 1;
 			break;
 		case CALIBRATE_1:
+			calibrate_1_start_time = current_time;
 			display.setCursor(0, 20);
 			display.setTextSize(2);
 			display.print("STAGE 1: HEATING to 240C");
@@ -311,7 +319,6 @@ void change_state(State new_state) {
 		default:
 			break;
 	}
-	has_state_changed = true;
 }
 
 uint16_t get_temperature_color() {
@@ -352,6 +359,8 @@ void main_menu_loop() {
 		else display.setTextColor(0xffff, 0x0000);
 		justified_text("CALIBRATE", 320 / 2, 195, CENTER);
 		display.setTextColor(0xffff, 0x0000);
+
+		last_drawn_selection = selection;
 	}
 }
 
@@ -372,16 +381,18 @@ void calibrate_1_loop() {
 	unsigned long current_time = millis();
 	if (current_temp >= 240) {
 		calibrate_2_start_time = current_time;
-		change_state(CALIBRATE_2);
+		calibration_lag_degrees = current_temp;
+		next_state = CALIBRATE_2;
 		return;
 	}
 
-	if (last_drawn_time = 0 || last_drawn_time - current_time >= 1000) {
+	if (last_drawn_time = 0 || current_time - last_drawn_time >= 1000) {
+		display.setTextSize(3);
 		justified_text( get_time_string(current_time - calibrate_1_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
-		last_drawn_time = current_time;
+		last_drawn_time = millis();
 	}
 }
 
@@ -398,19 +409,20 @@ void calibrate_2_loop() {
 	if (last_temp > current_temp) {
 		// Temperature is falling! Record things.
 		calibration_cool_lag_time = current_time - calibrate_2_start_time;
-		calibration_lag_degrees = last_temp;
+		calibration_lag_degrees = last_temp - calibration_lag_degrees;
 
 		calibrate_3_start_time = current_time;
-		change_state(CALIBRATE_3);
+		next_state = CALIBRATE_3 ;
 		return;
 	}
 
-	if (last_drawn_time = 0 || last_drawn_time - current_time >= 1000) {
+	if (last_drawn_time = 0 || current_time - last_drawn_time >= 1000) {
+		display.setTextSize(3);
 		justified_text( get_time_string(current_time - calibrate_2_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
-		last_drawn_time = current_time;
+		last_drawn_time = millis();
 	}
 }
 
@@ -427,16 +439,17 @@ void calibrate_3_loop() {
 		// Temperature is rising!
 		calibration_heat_lag_time = current_time - calibrate_3_start_time;
 
-		change_state(FINISHED_CALIBRATE);
+		next_state = FINISHED_CALIBRATE;
 		return;
 	}
 
-	if (last_drawn_time = 0 || last_drawn_time - current_time >= 1000) {
+	if (last_drawn_time = 0 || current_time - last_drawn_time >= 1000) {
+		display.setTextSize(3);
 		justified_text( get_time_string(current_time - calibrate_3_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
-		last_drawn_time = current_time;
+		last_drawn_time = millis();
 	}
 }
 
@@ -462,7 +475,7 @@ void reflow_loop() {
 		case COOL:
 			set_elements_state(false);
 			if (current_temp < 12) {
-				change_state(FINISHED_BAKE);
+				next_state = FINISHED_BAKE;
 			}
 			break;
 	}
@@ -508,17 +521,16 @@ void reflow_loop() {
 	}
 }
 
-bool check_pin_with_debounce(int pin) {
-	delay(10);
-	return digitalRead(pin);
-}
-
 void top_left_pushed() {
-	if (!check_pin_with_debounce(BUTTON_TOP_LEFT)) return;
 	switch (current_state) {
 		case MAIN_MENU:
-			calibrate_1_start_time = millis();
-			change_state(CALIBRATE_1);
+			if (selection == 1) {
+				next_state = CALIBRATE_1;
+			}
+			break;
+		case FINISHED_BAKE:
+		case FINISHED_CALIBRATE:
+			next_state = MAIN_MENU;
 			break;
 		default:
 			break;
@@ -526,11 +538,10 @@ void top_left_pushed() {
 }
 
 void top_right_pushed() {
-	if (!check_pin_with_debounce(BUTTON_TOP_RIGHT)) return;
 	switch (current_state) {
 		case MAIN_MENU:
 		case PICK_PROFILE:
-			selection = (selection + 1) % num_items;
+			selection = (selection + num_items - 1) % num_items;
 			break;
 		default:
 			break;
@@ -538,11 +549,10 @@ void top_right_pushed() {
 }
 
 void bottom_left_pushed() {
-	if (!check_pin_with_debounce(BUTTON_BOTTOM_LEFT)) return;
 	switch (current_state) {
 		case FINISHED_BAKE:
 		case FINISHED_CALIBRATE:
-			change_state(MAIN_MENU);
+			next_state = MAIN_MENU;
 			break;
 		default:
 			break;
@@ -550,11 +560,10 @@ void bottom_left_pushed() {
 }
 
 void bottom_right_pushed() {
-	if (!check_pin_with_debounce(BUTTON_BOTTOM_RIGHT)) return;
 	switch (current_state) {
 		case MAIN_MENU:
 		case PICK_PROFILE:
-			selection = (selection - 1) % num_items;
+			selection = (selection + 1) % num_items;
 			break;
 		default:
 			break;
@@ -584,13 +593,16 @@ void setup() {
 	display.setSPISpeed(62'500'000);
 	display.setRotation(3);
 
-	change_state(MAIN_MENU);
 	display.setFont();
 	display.setTextSize(2);
-	display.fillScreen(ST77XX_BLACK);
 	display.setTextColor(ST77XX_WHITE);
 
-	main_menu_loop();
+	for (int i = 0; i < 5; i++) {
+		update_temperature();
+		delay(50);
+	}
+
+	change_state(MAIN_MENU);
 }
 
 void loop() {
@@ -601,21 +613,25 @@ void loop() {
 		current_temp_color = temp_color;
 		draw_header();
 		draw_footer();
+	} else if (last_temp != current_temp){
+		draw_temperature();
 	}
 
-	draw_temperature();
+	text_bg_color = 0x0000;
 
-
-	int delay_ms = 1000;
+	int delay_ms = 100;
 	switch (current_state) {
 		case MAIN_MENU:
 			main_menu_loop();
 			break;
 		case CALIBRATE_1:
+			calibrate_1_loop();
+			break;
 		case CALIBRATE_2:
+			calibrate_2_loop();
+			break;
 		case CALIBRATE_3:
-			// Update very frequently so that our lag times are accurate.
-			delay_ms = 100;
+			calibrate_3_loop();
 			break;
 		case PICK_PROFILE:
 			break;
@@ -627,8 +643,9 @@ void loop() {
 			break;
 	}
 
-	if (!has_state_changed) {
-		has_state_changed = false;
+	if (next_state != current_state) {
+		change_state(next_state);
+	} else {
 		delay(delay_ms);
 	}
 }
