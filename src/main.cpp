@@ -28,8 +28,8 @@
 
 #define BUZZER (26)
 
-#define TOP_ELEMENT (26)
-#define BOTTOM_ELEMENT (26)
+#define TOP_ELEMENT (11)
+#define BOTTOM_ELEMENT (10)
 
 #define HEADER_FOOTER_SIZE (12)
 #define TEMPERATURE_WARM (50)
