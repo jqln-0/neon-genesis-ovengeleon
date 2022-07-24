@@ -2,6 +2,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
+#include <LittleFS.h>
 
 #include <sstream>
 #include <string>
@@ -20,6 +21,10 @@
 #define BUTTON_TOP_RIGHT (14)
 #define BUTTON_BOTTOM_LEFT (13)
 #define BUTTON_BOTTOM_RIGHT (15)
+
+#define LED_RED (6)
+#define LED_GREEN (7)
+#define LED_BLUE (8)
 
 #define BUZZER (26)
 
@@ -60,6 +65,7 @@ int last_temp = -1;
 uint16_t current_temp_color = 0x0000;
 
 // Calibration
+bool is_calibrated = false;
 unsigned long last_drawn_time = 0;
 unsigned long calibrate_1_start_time = 0;
 unsigned long calibrate_2_start_time = 0;
@@ -257,70 +263,6 @@ void set_elements_state(bool on_or_off) {
 	}
 }
 
-void change_state(State new_state) {
-	display.fillScreen(ST77XX_BLACK);
-	draw_header();
-	draw_footer();
-	text_bg_color = 0x0000;
-
-	current_state = new_state;
-	last_drawn_selection = -1;
-	selection = 0;
-	unsigned long current_time = millis();
-	switch (current_state) {
-		case MAIN_MENU:
-			set_elements_state(false);
-			display.setFont(&FreeSerif18pt7b);
-			display.setTextSize(1);
-			display.setCursor(0, 50);
-			display.print("NEON\nGENESIS\nOVENGELION");
-			display.setFont();
-			num_items = 2;
-			break;
-		case PICK_PROFILE:
-			// TODO.
-			num_items = 1;
-			break;
-		case CALIBRATE_1:
-			calibrate_1_start_time = current_time;
-			display.setCursor(0, 20);
-			display.setTextSize(2);
-			display.print("STAGE 1: HEATING to 240C");
-			break;
-		case CALIBRATE_2:
-			display.setCursor(0, 20);
-			display.setTextSize(2);
-			display.print("STAGE 2: WAIT FOR COOL");
-			break;
-		case CALIBRATE_3:
-			display.setCursor(0, 20);
-			display.setTextSize(2);
-			display.print("STAGE 3: WAIT FOR HEAT");
-			break;
-		case FINISHED_CALIBRATE:
-			set_elements_state(false);
-			display.setCursor(0, 20);
-			display.setTextSize(2);
-			display.print("CALIBRATION COMPLETE!\n");
-			display.print("TOTAL TIME: ");
-			display.println(get_time_string(current_time - calibrate_1_start_time).c_str());
-			display.print("COOL LAG TIME: ");
-			display.println(get_time_string(calibration_cool_lag_time).c_str());
-			display.print("HEAT LAG TIME: ");
-			display.println(get_time_string(calibration_heat_lag_time).c_str());
-			display.print("LAG DEGREES: ");
-			display.println(calibration_lag_degrees);
-
-			display.print("\nWRITING TO FLASH... ");
-			// TODO: write to filesystem.
-			delay(1000);
-			display.print("OK!");
-			break;
-		default:
-			break;
-	}
-}
-
 uint16_t get_temperature_color() {
 	if (current_temp == -1 || last_temp == -1) {
 		return 0x0000;
@@ -347,6 +289,28 @@ void update_temperature() {
 	current_temp = test_temperature;
 }
 
+void main_menu_setup() {
+	set_elements_state(false);
+
+	display.setFont(&FreeSerif18pt7b);
+	display.setTextSize(1);
+	display.setCursor(0, 50);
+	display.print("NEON\nGENESIS\nOVENGELION");
+	display.setFont();
+
+	if (is_calibrated) {
+		display.setTextColor(0x0000, 0x0F00);
+		justified_text("CALIBRATION OK", 320, 220, RIGHT);
+	} else {
+		display.setTextColor(0x0000, 0xF000);
+		justified_text("NO CALIBRATION", 320, 220, RIGHT);
+	}
+
+	display.setTextColor(0xffff, 0x0000);
+
+	num_items = 2;
+}
+
 void main_menu_loop() {
 	display.setTextSize(2);
 	display.setFont();
@@ -362,6 +326,14 @@ void main_menu_loop() {
 
 		last_drawn_selection = selection;
 	}
+}
+
+void calibrate_1_setup() {
+	calibrate_1_start_time = millis();
+
+	display.setCursor(0, 20);
+	display.setTextSize(2);
+	display.print("STAGE 1: HEATING to 240C");
 }
 
 /**
@@ -386,14 +358,21 @@ void calibrate_1_loop() {
 		return;
 	}
 
-	if (last_drawn_time = 0 || current_time - last_drawn_time >= 1000) {
+	if (last_drawn_time == 0 || current_time - last_drawn_time >= 1000) {
 		display.setTextSize(3);
 		justified_text( get_time_string(current_time - calibrate_1_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
-		last_drawn_time = millis();
+		last_drawn_time = current_time;
 	}
+}
+
+void calibrate_2_setup() {
+	// Start time was set by stage 1 already.
+	display.setCursor(0, 20);
+	display.setTextSize(2);
+	display.print("STAGE 2: WAIT FOR COOL");
 }
 
 /**
@@ -416,14 +395,21 @@ void calibrate_2_loop() {
 		return;
 	}
 
-	if (last_drawn_time = 0 || current_time - last_drawn_time >= 1000) {
+	if (last_drawn_time == 0 || current_time - last_drawn_time >= 1000) {
 		display.setTextSize(3);
 		justified_text( get_time_string(current_time - calibrate_2_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
-		last_drawn_time = millis();
+		last_drawn_time = current_time;
 	}
+}
+
+void calibrate_3_setup() {
+	// Start time was set by stage 3 already.
+	display.setCursor(0, 20);
+	display.setTextSize(2);
+	display.print("STAGE 3: WAIT FOR REHEAT");
 }
 
 /**
@@ -443,14 +429,54 @@ void calibrate_3_loop() {
 		return;
 	}
 
-	if (last_drawn_time = 0 || current_time - last_drawn_time >= 1000) {
+	if (last_drawn_time == 0 || current_time - last_drawn_time >= 1000) {
 		display.setTextSize(3);
 		justified_text( get_time_string(current_time - calibrate_3_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
-		last_drawn_time = millis();
+		last_drawn_time = current_time;
 	}
+}
+
+void finished_calibrate_setup() {
+	set_elements_state(false);
+
+	unsigned long current_time = millis();
+
+	display.setCursor(0, 20);
+	display.setTextSize(2);
+	display.print("CALIBRATION COMPLETE!\n");
+	display.print("TOTAL TIME: ");
+	display.println(get_time_string(current_time - calibrate_1_start_time).c_str());
+	display.print("COOL LAG TIME: ");
+	display.println(get_time_string(calibration_cool_lag_time).c_str());
+	display.print("HEAT LAG TIME: ");
+	display.println(get_time_string(calibration_heat_lag_time).c_str());
+	display.print("LAG DEGREES: ");
+	display.println(calibration_lag_degrees);
+
+	display.print("\nWRITING TO FLASH... ");
+	
+	bool r = LittleFS.begin();
+	if (!r) {
+		digitalWrite(LED_BLUE, LOW);
+	} else {
+		File f = LittleFS.open("CALIBRATION", "w");
+		if (!f) {
+			digitalWrite(LED_RED, LOW);
+		} else {
+			f.println(calibration_cool_lag_time);
+			f.println(calibration_heat_lag_time);
+			f.println(calibration_lag_degrees);
+			f.close();
+		}
+		LittleFS.end();
+	}
+
+	// Hooray! :)
+	is_calibrated = true;
+	display.print("OK!");
 }
 
 void pick_profile_loop() {
@@ -521,7 +547,13 @@ void reflow_loop() {
 	}
 }
 
+bool read_debounced(int pin) {
+	delay(10);
+	return digitalRead(pin);
+}
+
 void top_left_pushed() {
+	if (read_debounced(BUTTON_TOP_LEFT)) return;
 	switch (current_state) {
 		case MAIN_MENU:
 			if (selection == 1) {
@@ -538,6 +570,7 @@ void top_left_pushed() {
 }
 
 void top_right_pushed() {
+	if (read_debounced(BUTTON_TOP_RIGHT)) return;
 	switch (current_state) {
 		case MAIN_MENU:
 		case PICK_PROFILE:
@@ -549,6 +582,7 @@ void top_right_pushed() {
 }
 
 void bottom_left_pushed() {
+	if (read_debounced(BUTTON_BOTTOM_LEFT)) return;
 	switch (current_state) {
 		case FINISHED_BAKE:
 		case FINISHED_CALIBRATE:
@@ -560,10 +594,50 @@ void bottom_left_pushed() {
 }
 
 void bottom_right_pushed() {
+	if (read_debounced(BUTTON_BOTTOM_RIGHT)) return;
 	switch (current_state) {
 		case MAIN_MENU:
 		case PICK_PROFILE:
 			selection = (selection + 1) % num_items;
+			break;
+		default:
+			break;
+	}
+}
+
+void change_state(State new_state) {
+	display.fillScreen(ST77XX_BLACK);
+	draw_header();
+	draw_footer();
+	text_bg_color = 0x0000;
+
+	current_state = new_state;
+
+	// Any menu would want to be reset anyway.
+	last_drawn_selection = -1;
+	selection = 0;
+
+	unsigned long current_time = millis();
+	File f;
+	switch (current_state) {
+		case MAIN_MENU:
+			main_menu_setup();
+			break;
+		case PICK_PROFILE:
+			// TODO.
+			num_items = 1;
+			break;
+		case CALIBRATE_1:
+			calibrate_1_setup();
+			break;
+		case CALIBRATE_2:
+			calibrate_2_setup();
+			break;
+		case CALIBRATE_3:
+			calibrate_3_setup();
+			break;
+		case FINISHED_CALIBRATE:
+			finished_calibrate_setup();
 			break;
 		default:
 			break;
@@ -589,6 +663,13 @@ void setup() {
 	pinMode(DISPLAY_BACKLIGHT_EN, OUTPUT);
 	digitalWrite(DISPLAY_BACKLIGHT_EN, HIGH);
 
+	pinMode(LED_RED, OUTPUT);
+	pinMode(LED_GREEN, OUTPUT);
+	pinMode(LED_BLUE, OUTPUT);
+	digitalWrite(LED_RED, HIGH);
+	digitalWrite(LED_GREEN, HIGH);
+	digitalWrite(LED_BLUE, HIGH);
+
 	display.init(240, 320);
 	display.setSPISpeed(62'500'000);
 	display.setRotation(3);
@@ -596,6 +677,23 @@ void setup() {
 	display.setFont();
 	display.setTextSize(2);
 	display.setTextColor(ST77XX_WHITE);
+
+	bool r = LittleFS.begin();
+	if (!r) {
+		digitalWrite(LED_BLUE, LOW);
+	} else {
+		File f = LittleFS.open("CALIBRATION", "r");
+		if (!f) {
+			digitalWrite(LED_RED, LOW);
+		} else {
+			calibration_cool_lag_time = f.parseInt();
+			calibration_heat_lag_time = f.parseInt();
+			calibration_lag_degrees = f.parseInt();
+			f.close();
+			is_calibrated = true;
+		}
+		LittleFS.end();
+	}
 
 	for (int i = 0; i < 5; i++) {
 		update_temperature();
