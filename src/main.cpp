@@ -11,6 +11,8 @@
 
 #include <Fonts/FreeSerif18pt7b.h>
 
+#include <pico/util/queue.h>
+
 #define DISPLAY_CS (17)
 #define DISPLAY_DC (16)
 #define DISPLAY_SCLK (18)
@@ -40,7 +42,49 @@ using std::ostringstream;
 
 // ** GLOBALS ** //
 
-Adafruit_ST7789 display = Adafruit_ST7789(DISPLAY_CS, DISPLAY_DC, DISPLAY_MOSI, DISPLAY_SCLK);
+class NoArgsType {};
+class RectType {
+	public:
+		int x,y,w,h;
+		uint16_t color;
+};
+enum Justification {
+	LEFT,
+	CENTER,
+	RIGHT,
+};
+class TextType {
+	public:
+		int x,y;
+		uint16_t fg_color, bg_color;
+		Justification justify;
+};
+class CursorType {
+	public:
+		int x,y;
+};
+class ConfigType {
+	public:
+		int textSize;
+		uint16_t textColor;
+		const GFXfont *font;
+};
+class DrawMessage {
+	public:
+		enum { CLEAR,RECT,TEXT,CURSOR,PRINT,CONFIG } type;
+		union {
+			NoArgsType nothing;
+			RectType rect;
+			TextType text;
+			CursorType cursor;
+			ConfigType config;
+		};
+		// Delcared separately due to containing a string.
+		string *str = nullptr;
+};
+
+
+queue_t drawing_queue;
 
 // Drawing
 uint16_t text_bg_color = 0x0000;
@@ -94,23 +138,67 @@ int num_items = 0;
 
 // ** UTIL FUNCTIONS ** //
 
-enum Justification {
-	LEFT,
-	CENTER,
-	RIGHT,
-};
+void send_clear() {
+	DrawMessage msg{ DrawMessage::CLEAR, NoArgsType{} };
+	queue_add_blocking(&drawing_queue, &msg);
+}
 
-void justified_text(const string& text, int x, int y, Justification j) {
-	int16_t xx, yy;
-	uint16_t w, h;
-	display.getTextBounds(text.c_str(), 0, 0, &xx, &yy, &w, &h);
+void send_text(string text, int x, int y, Justification j, uint16_t fg=0xFFFF, uint16_t bg=0x0000) {
+	DrawMessage msg{
+		DrawMessage::TEXT,
+		{
+			.text=TextType{
+				x, y,
+				fg, bg,
+				j,
+			}
+		},
+		new string(text)
+	};
+	queue_add_blocking(&drawing_queue, &msg);
+}
 
-	if (j == CENTER) x -= w / 2;
-	if (j == RIGHT) x -= w;
+void send_config(int textSize=1, uint16_t textColor=0xFFFF, const GFXfont *font=NULL) {
+	DrawMessage msg{
+		DrawMessage::CONFIG,
+		{
+			.config=ConfigType{
+				textSize,
+				textColor,
+				font
+			}
+		}
+	};
+	queue_add_blocking(&drawing_queue, &msg);
+}
 
-	display.fillRect(x, y, w, h, text_bg_color);
-	display.setCursor(x, y);
-	display.print(text.c_str());
+void send_rect(int x, int y, int w, int h, uint16_t color) {
+	DrawMessage msg{
+		DrawMessage::RECT,
+		{
+			.rect=RectType{x,y,w,h,color}
+		}
+	};
+	queue_add_blocking(&drawing_queue, &msg);
+}
+
+void send_print(string text, int x=-1, int y=-1) {
+	if (x != -1 && y != -1) {
+		DrawMessage msg{
+			DrawMessage::CURSOR,
+			{
+				.cursor=CursorType{x, y}
+			}
+		};
+		queue_add_blocking(&drawing_queue, &msg);
+	}
+
+	DrawMessage msg{
+		DrawMessage::PRINT,
+		{ NoArgsType{} },
+		new string(text)
+	};
+	queue_add_blocking(&drawing_queue, &msg);
 }
 
 string get_time_string(unsigned long millis) {
@@ -122,7 +210,6 @@ string get_time_string(unsigned long millis) {
 }
 
 void draw_temperature() {
-	display.setTextSize(1);
 	string temp_sign = "";
 	if (current_temp != -1 && last_temp != -1) {
 		if (current_temp > last_temp) temp_sign = "+++";
@@ -136,16 +223,11 @@ void draw_temperature() {
 	temp_string << "C " << temp_sign;
 	string text = temp_string.str();
 
-	int16_t x, y;
-	uint16_t w, h;
-	display.getTextBounds(text.c_str(), 0, 0, &x, &y, &w, &h);
+	int x = (320 / 2);
+	int y = 240 - HEADER_FOOTER_SIZE + 2;
 
-	x = (320 / 2) - (w / 2);
-	y = 240 - HEADER_FOOTER_SIZE + 2;
-
-	display.setCursor(x, y);
-	display.fillRect(x, y, w, h, current_temp_color);
-	display.print(text.c_str());
+	send_config();
+	send_text(text, x, y, CENTER, 0xFFFF, current_temp_color);
 }
 
 void draw_header() {
@@ -153,9 +235,8 @@ void draw_header() {
 	uint16_t color_bg = current_temp_color;
 	text_bg_color = color_bg;
 
-	display.fillRect(0, 0, 320, HEADER_FOOTER_SIZE, color_bg);
-	display.setTextColor(color_fg);
-	display.setTextSize(1);
+	send_rect(0, 0, 320, HEADER_FOOTER_SIZE, color_bg);
+	send_config();
 
 	string l_action = "";
 	switch (current_state) {
@@ -170,7 +251,7 @@ void draw_header() {
 		default:
 			break;
 	}
-	justified_text(l_action, 0, 2, LEFT);
+	send_text(l_action, 0, 2, LEFT, color_fg, color_bg);
 
 	string title = "";
 	switch (current_state) {
@@ -196,7 +277,7 @@ void draw_header() {
 		default:
 			break;
 	}
-	justified_text(title, 320 / 2, 2, CENTER);
+	send_text(title, 320 / 2, 2, CENTER, color_fg, color_bg);
 
 	string r_action = "";
 	switch (current_state) {
@@ -207,7 +288,7 @@ void draw_header() {
 		default:
 			break;
 	}
-	justified_text(r_action, 320, 2, RIGHT);
+	send_text(r_action, 320, 2, RIGHT, color_fg, color_bg);
 }
 
 void draw_footer() {
@@ -215,9 +296,8 @@ void draw_footer() {
 	uint16_t color_bg = current_temp_color;
 	text_bg_color = color_bg;
 
-	display.fillRect(0, 240 - HEADER_FOOTER_SIZE, 320, HEADER_FOOTER_SIZE, color_bg);
-	display.setTextColor(color_fg);
-	display.setTextSize(1);
+	send_rect(0, 240 - HEADER_FOOTER_SIZE, 320, HEADER_FOOTER_SIZE, color_bg);
+	send_config();
 
 	string l_action = "";
 	switch (current_state) {
@@ -233,7 +313,7 @@ void draw_footer() {
 		default:
 			break;
 	}
-	justified_text(l_action, 0, 240 - HEADER_FOOTER_SIZE + 2, LEFT);
+	send_text(l_action, 0, 240 - HEADER_FOOTER_SIZE + 2, LEFT, color_fg, color_bg);
 
 	string r_action = "";
 	switch (current_state) {
@@ -244,13 +324,14 @@ void draw_footer() {
 		default:
 			break;
 	}
-	justified_text(r_action, 320, 240 - HEADER_FOOTER_SIZE + 2, RIGHT);
+	send_text(r_action, 320, 240 - HEADER_FOOTER_SIZE + 2, RIGHT, color_fg, color_bg);
 
 	draw_temperature();
 }
 
 bool test_elements_state = false;
 int test_temperature = 24;
+unsigned long last_temp_time = 0;
 
 void set_elements_state(bool on_or_off) {
 	test_elements_state = on_or_off;
@@ -280,10 +361,14 @@ void update_temperature() {
 	last_temp = current_temp;
 
 	// TODO: read the sensor
-	if (test_elements_state) {
-		test_temperature++;
-	} else if (test_temperature > 24) {
-		test_temperature--;
+	unsigned long t = millis();
+	if (t - last_temp_time > 250) {
+		if (test_elements_state) {
+			test_temperature++;
+		} else if (test_temperature > 24) {
+			test_temperature--;
+		}
+		last_temp_time = t;
 	}
 	
 	current_temp = test_temperature;
@@ -292,37 +377,32 @@ void update_temperature() {
 void main_menu_setup() {
 	set_elements_state(false);
 
-	display.setFont(&FreeSerif18pt7b);
-	display.setTextSize(1);
-	display.setCursor(0, 50);
-	display.print("NEON\nGENESIS\nOVENGELION");
-	display.setFont();
+	send_config(1, 0xFFFF, &FreeSerif18pt7b);
+	send_print("NEON\nGENESIS\nOVENGELION", 0, 50);
 
+	send_config();
 	if (is_calibrated) {
-		display.setTextColor(0x0000, 0x0F00);
-		justified_text("CALIBRATION OK", 320, 220, RIGHT);
+		send_text("CALIBRATION OK", 320, 220, RIGHT, 0x0000, 0x0F00);
 	} else {
-		display.setTextColor(0x0000, 0xF000);
-		justified_text("NO CALIBRATION", 320, 220, RIGHT);
+		send_text("NO CALIBRATION", 320, 220, RIGHT, 0x0000, 0xF000);
 	}
-
-	display.setTextColor(0xffff, 0x0000);
 
 	num_items = 2;
 }
 
 void main_menu_loop() {
-	display.setTextSize(2);
-	display.setFont();
+	send_config(2);
 
 	if (last_drawn_selection != selection) {
-		if (selection == 0) display.setTextColor(0x0000, 0xffff);
-		else display.setTextColor(0xffff, 0x0000);
-		justified_text("BAKE", 320 / 2, 165, CENTER);
-		if (selection == 1) display.setTextColor(0x0000, 0xffff);
-		else display.setTextColor(0xffff, 0x0000);
-		justified_text("CALIBRATE", 320 / 2, 195, CENTER);
-		display.setTextColor(0xffff, 0x0000);
+		int fg, bg;
+
+		if (selection == 0) { fg=0x0000; bg=0xFFFF; }
+		else { fg=0xFFFF; bg=0x0000; }
+		send_text("BAKE", 320 / 2, 165, CENTER, fg, bg);
+
+		if (selection == 1) { fg=0x0000; bg=0xFFFF; }
+		else { fg=0xFFFF; bg=0x0000; }
+		send_text("CALIBRATE", 320 / 2, 195, CENTER, fg, bg);
 
 		last_drawn_selection = selection;
 	}
@@ -331,9 +411,8 @@ void main_menu_loop() {
 void calibrate_1_setup() {
 	calibrate_1_start_time = millis();
 
-	display.setCursor(0, 20);
-	display.setTextSize(2);
-	display.print("STAGE 1: HEATING to 240C");
+	send_config(2);
+	send_print("STAGE 1: HEATING to 240C", 0, 20);
 }
 
 /**
@@ -359,8 +438,8 @@ void calibrate_1_loop() {
 	}
 
 	if (last_drawn_time == 0 || current_time - last_drawn_time >= 1000) {
-		display.setTextSize(3);
-		justified_text( get_time_string(current_time - calibrate_1_start_time),
+		send_config(3);
+		send_text(get_time_string(current_time - calibrate_1_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
@@ -370,9 +449,8 @@ void calibrate_1_loop() {
 
 void calibrate_2_setup() {
 	// Start time was set by stage 1 already.
-	display.setCursor(0, 20);
-	display.setTextSize(2);
-	display.print("STAGE 2: WAIT FOR COOL");
+	send_config(2);
+	send_print("STAGE 2: WAIT FOR COOL", 0, 20);
 }
 
 /**
@@ -396,8 +474,8 @@ void calibrate_2_loop() {
 	}
 
 	if (last_drawn_time == 0 || current_time - last_drawn_time >= 1000) {
-		display.setTextSize(3);
-		justified_text( get_time_string(current_time - calibrate_2_start_time),
+		send_config(3);
+		send_text( get_time_string(current_time - calibrate_2_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
@@ -407,9 +485,8 @@ void calibrate_2_loop() {
 
 void calibrate_3_setup() {
 	// Start time was set by stage 3 already.
-	display.setCursor(0, 20);
-	display.setTextSize(2);
-	display.print("STAGE 3: WAIT FOR REHEAT");
+	send_config(2);
+	send_print("STAGE 3: WAIT FOR REHEAT", 0, 20);
 }
 
 /**
@@ -430,8 +507,8 @@ void calibrate_3_loop() {
 	}
 
 	if (last_drawn_time == 0 || current_time - last_drawn_time >= 1000) {
-		display.setTextSize(3);
-		justified_text( get_time_string(current_time - calibrate_3_start_time),
+		send_config(3);
+		send_text( get_time_string(current_time - calibrate_3_start_time),
 				320 / 2,
 				240 / 2,
 				CENTER);
@@ -444,19 +521,18 @@ void finished_calibrate_setup() {
 
 	unsigned long current_time = millis();
 
-	display.setCursor(0, 20);
-	display.setTextSize(2);
-	display.print("CALIBRATION COMPLETE!\n");
-	display.print("TOTAL TIME: ");
-	display.println(get_time_string(current_time - calibrate_1_start_time).c_str());
-	display.print("COOL LAG TIME: ");
-	display.println(get_time_string(calibration_cool_lag_time).c_str());
-	display.print("HEAT LAG TIME: ");
-	display.println(get_time_string(calibration_heat_lag_time).c_str());
-	display.print("LAG DEGREES: ");
-	display.println(calibration_lag_degrees);
+	send_config(2);
+	send_print("CALIBRATION COMPLETE!\n", 0, 20);
+	send_print("TOTAL TIME: ");
+	send_print(get_time_string(current_time - calibrate_1_start_time));
+	send_print("\nCOOL LAG TIME: ");
+	send_print(get_time_string(calibration_cool_lag_time));
+	send_print("\nHEAT LAG TIME: ");
+	send_print(get_time_string(calibration_heat_lag_time));
+	send_print("\nLAG DEGREES: ");
+	send_print(std::to_string(calibration_lag_degrees));
 
-	display.print("\nWRITING TO FLASH... ");
+	send_print("\nWRITING TO FLASH... ");
 	
 	bool r = LittleFS.begin();
 	if (!r) {
@@ -476,7 +552,7 @@ void finished_calibrate_setup() {
 
 	// Hooray! :)
 	is_calibrated = true;
-	display.print("OK!");
+	send_print("OK!");
 }
 
 void pick_profile_loop() {
@@ -608,7 +684,7 @@ void bottom_right_pushed() {
 void change_state(State new_state) {
 	current_state = new_state;
 
-	display.fillScreen(ST77XX_BLACK);
+	send_clear();
 	draw_header();
 	draw_footer();
 	text_bg_color = 0x0000;
@@ -645,6 +721,19 @@ void change_state(State new_state) {
 }
 
 void setup() {
+	// Ensure the elements are off immediately, for safety.
+	pinMode(TOP_ELEMENT, OUTPUT);
+	pinMode(BOTTOM_ELEMENT, OUTPUT);
+	digitalWrite(TOP_ELEMENT, LOW);
+	digitalWrite(BOTTOM_ELEMENT, LOW);
+
+	// Next set up our multicore comms, then signal to the other core that
+	// it can proceed.
+	queue_init(&drawing_queue, sizeof(DrawMessage), 16);
+	rp2040.fifo.push(0xDEADBEEF);
+
+	// Now onto the rest of our init...
+
 	pinMode(BUTTON_TOP_LEFT, INPUT_PULLUP);
 	pinMode(BUTTON_TOP_RIGHT, INPUT_PULLUP);
 	pinMode(BUTTON_BOTTOM_LEFT, INPUT_PULLUP);
@@ -655,11 +744,6 @@ void setup() {
 	attachInterrupt(digitalPinToInterrupt(BUTTON_BOTTOM_LEFT), bottom_left_pushed, FALLING);
 	attachInterrupt(digitalPinToInterrupt(BUTTON_BOTTOM_RIGHT), bottom_right_pushed, FALLING);
 
-	pinMode(TOP_ELEMENT, OUTPUT);
-	pinMode(BOTTOM_ELEMENT, OUTPUT);
-	digitalWrite(TOP_ELEMENT, LOW);
-	digitalWrite(BOTTOM_ELEMENT, LOW);
-
 	pinMode(DISPLAY_BACKLIGHT_EN, OUTPUT);
 	digitalWrite(DISPLAY_BACKLIGHT_EN, HIGH);
 
@@ -669,14 +753,6 @@ void setup() {
 	digitalWrite(LED_RED, HIGH);
 	digitalWrite(LED_GREEN, HIGH);
 	digitalWrite(LED_BLUE, HIGH);
-
-	display.init(240, 320);
-	display.setSPISpeed(62'500'000);
-	display.setRotation(3);
-
-	display.setFont();
-	display.setTextSize(2);
-	display.setTextColor(ST77XX_WHITE);
 
 	bool r = LittleFS.begin();
 	if (!r) {
@@ -745,5 +821,82 @@ void loop() {
 		change_state(next_state);
 	} else {
 		delay(delay_ms);
+	}
+}
+
+/** SECOND CORE **/
+Adafruit_ST7789 core1_display = Adafruit_ST7789(DISPLAY_CS, DISPLAY_DC, DISPLAY_MOSI, DISPLAY_SCLK);
+
+void core1_draw_text(const TextType& text, const string& actual_text) {
+	auto str = actual_text.c_str();
+
+	int16_t x, y;
+	uint16_t w, h;
+	core1_display.getTextBounds(str, 0, 0, &x, &y, &w, &h);
+
+	x = text.x;
+	y = text.y;
+
+	if (text.justify == CENTER) x -= w / 2;
+	if (text.justify == RIGHT) x -= w;
+
+	core1_display.setTextColor(text.fg_color);
+	core1_display.fillRect(x, y, w, h, text.bg_color);
+	core1_display.setCursor(x, y);
+	core1_display.print(str);
+}
+
+void setup1() {
+	core1_display.init(240, 320);
+	core1_display.setSPISpeed(62'500'000);
+	core1_display.setRotation(3);
+
+	core1_display.setFont();
+	core1_display.setTextSize(2);
+	core1_display.setTextColor(ST77XX_WHITE);
+
+	// Wait for the other core to signal us before starting our loop.
+	rp2040.fifo.pop();
+}
+
+void loop1() {
+	DrawMessage message{DrawMessage::CLEAR, { NoArgsType{} }};
+	queue_remove_blocking(&drawing_queue, &message);
+
+	string copied_text;
+	if (message.str != nullptr) {
+		copied_text = *message.str;
+		delete message.str;
+	}
+
+	switch (message.type) {
+		case DrawMessage::CLEAR:
+			core1_display.fillScreen(0x0000);
+			break;
+		case DrawMessage::RECT:
+			core1_display.fillRect(
+					message.rect.x,
+					message.rect.y,
+					message.rect.w,
+					message.rect.h,
+					message.rect.color);
+			break;
+		case DrawMessage::CURSOR:
+			core1_display.setCursor(
+					message.cursor.x,
+					message.cursor.y);
+			break;
+		case DrawMessage::PRINT:
+			core1_display.print(copied_text.c_str());
+			break;
+		case DrawMessage::TEXT:
+			core1_draw_text(message.text, copied_text);
+			break;
+		case DrawMessage::CONFIG:
+			core1_display.setTextSize(message.config.textSize);
+			core1_display.setTextColor(message.config.textColor);
+			core1_display.setFont(message.config.font);
+		default:
+			break;
 	}
 }
