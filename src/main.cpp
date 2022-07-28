@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
+#include <Adafruit_MAX31855.h>
 #include <SPI.h>
 #include <LittleFS.h>
 
@@ -18,6 +19,10 @@
 #define DISPLAY_SCLK (18)
 #define DISPLAY_MOSI (19)
 #define DISPLAY_BACKLIGHT_EN (20)
+
+#define TEMP_DO (27)
+#define TEMP_CS (26)
+#define TEMP_CLK (22)
 
 #define BUTTON_TOP_LEFT (12)
 #define BUTTON_TOP_RIGHT (14)
@@ -41,6 +46,8 @@ using std::string;
 using std::ostringstream;
 
 // ** GLOBALS ** //
+
+Adafruit_MAX31855 thermocouple(TEMP_CLK, TEMP_CS, TEMP_DO);
 
 class NoArgsType {};
 class RectType {
@@ -360,7 +367,14 @@ uint16_t get_temperature_color() {
 void update_temperature() {
 	last_temp = current_temp;
 
-	// TODO: read the sensor
+	double raw_value = thermocouple.readCelsius();
+	if (isnan(raw_value)) {
+		current_temp = -1;
+	} else {
+		current_temp = (int) (raw_value + 0.5);
+	}
+
+	/*
 	unsigned long t = millis();
 	if (t - last_temp_time > 250) {
 		if (test_elements_state) {
@@ -370,8 +384,8 @@ void update_temperature() {
 		}
 		last_temp_time = t;
 	}
-	
 	current_temp = test_temperature;
+	*/
 }
 
 void main_menu_setup() {
@@ -771,12 +785,13 @@ void setup() {
 		LittleFS.end();
 	}
 
-	for (int i = 0; i < 5; i++) {
-		update_temperature();
-		delay(50);
-	}
-
 	change_state(MAIN_MENU);
+
+	// Init the temperature sensor whilst we wait for the initial screen draw.
+	for (int i = 0; i < 5; i++) {
+		delay(100);
+		update_temperature();
+	}
 }
 
 void loop() {
