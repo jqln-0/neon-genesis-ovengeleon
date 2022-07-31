@@ -76,15 +76,27 @@ class ConfigType {
 		uint16_t textColor;
 		const GFXfont *font;
 };
+class LineType {
+	public:
+		uint16_t x0,y0,x1,y1;
+		uint16_t color;
+};
+class PixelType {
+	public:
+		uint16_t x,y;
+		uint16_t color;
+};
 class DrawMessage {
 	public:
-		enum { CLEAR,RECT,TEXT,CURSOR,PRINT,CONFIG } type;
+		enum { CLEAR,RECT,TEXT,CURSOR,PRINT,CONFIG,LINE,PIXEL } type;
 		union {
 			NoArgsType nothing;
 			RectType rect;
 			TextType text;
 			CursorType cursor;
 			ConfigType config;
+			LineType line;
+			PixelType pixel;
 		};
 		// Delcared separately due to containing a string.
 		string *str = nullptr;
@@ -133,10 +145,20 @@ enum ReflowState {
 	COOL
 };
 ReflowState reflow_state = PREHEAT;
+
+int preheat_temp = 150;
+int preheat_duration = 35'000;
+int soak_temp = 175;
+int soak_duration = 90'000;
+int reflow_temp = 249;
+int reflow_duration = 60'000;
+int cool_duration = 35'000;
+
 int holding_at_temp = 0;
 int holding_at_time = 0;
 int holding_at_reheat_time = 0;
 int desired_temp = 0;
+unsigned long reflow_state_start_time = 0;
 
 // Menus
 int last_drawn_selection = -1;
@@ -204,6 +226,26 @@ void send_print(string text, int x=-1, int y=-1) {
 		DrawMessage::PRINT,
 		{ NoArgsType{} },
 		new string(text)
+	};
+	queue_add_blocking(&drawing_queue, &msg);
+}
+
+void send_line(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, uint16_t color) {
+	DrawMessage msg{
+		DrawMessage::LINE,
+		{
+			.line=LineType{x0,y0,x1,y1,color}
+		}
+	};
+	queue_add_blocking(&drawing_queue, &msg);
+}
+
+void send_pixel(uint16_t x, uint16_t y, uint16_t color) {
+	DrawMessage msg{
+		DrawMessage::PIXEL,
+		{
+			.pixel=PixelType{x,y,color}
+		}
 	};
 	queue_add_blocking(&drawing_queue, &msg);
 }
@@ -569,32 +611,123 @@ void finished_calibrate_setup() {
 	send_print("OK!");
 }
 
+int get_desired_temperature(ReflowState state, unsigned long time_in_state) {
+	// Easy states first.
+	if (state == PREHEAT) {
+		return preheat_temp;
+	}
+	if (state == COOL) {
+		return 0;
+	}
+
+	int start = 0;
+	int end = 0;
+	long duration = 1;
+	switch (state) {
+		case SOAK:
+			start = preheat_temp;
+			end = soak_temp;
+			duration = soak_duration;
+			break;
+		case REFLOW:
+			start = soak_temp;
+			end = reflow_temp;
+			duration = reflow_duration;
+			break;
+		default:
+			break;
+	}
+
+	double progress = time_in_state / (float) duration;
+	double desired_temp = ((end - start) * progress) + start;
+	// Safety first!
+	if (desired_temp > end) desired_temp = end;
+
+	return (int) (desired_temp + 0.5);
+}
+
+void bake_setup() {
+	int graph_width = 280;
+	int graph_height = 140;
+	int graph_x = 20;
+	int graph_y = 80;
+
+	// First draw the axises!
+	send_line(graph_x-1,graph_y+graph_height+1,graph_x+graph_width+1,graph_y+graph_height+1,0xF000);
+	send_line(graph_x-1,graph_y-1,graph_x-1,graph_y+graph_height+1,0xF000);
+
+	// Now draw the pretty ideal curve!
+	unsigned long total_time =
+		preheat_duration +
+		soak_duration +
+		reflow_duration +
+		cool_duration;
+	for (int x = graph_x; x < graph_x + graph_width; x++) {
+		double progress = (x - graph_x) / (float) graph_width;
+		unsigned long current_time = total_time * progress;
+
+		int desired_temp;
+		if (current_time < preheat_duration) {
+			progress = current_time / (float) preheat_duration;
+			desired_temp = ((preheat_temp - current_temp) * progress) + current_temp;
+		} else if (current_time > total_time - cool_duration) {
+			unsigned long preheat_start = total_time - cool_duration;
+			progress = 1 - ((current_time - preheat_start) / (float) preheat_duration);
+			desired_temp = ((reflow_temp - current_temp) * progress) + current_temp;
+		} else {
+			unsigned long time_in_state = current_time - preheat_duration;
+			ReflowState state = SOAK;
+			if (time_in_state > soak_duration) {
+				time_in_state -= soak_duration;
+				state = REFLOW;
+			}
+			desired_temp = get_desired_temperature(state, time_in_state);
+		}
+		double scaled_temp = ((float) graph_height / 275) * desired_temp;
+		int y = graph_y + graph_height - scaled_temp;
+		send_pixel(x, y, 0xFFFF);
+	}
+}
+
 void pick_profile_loop() {
 	// TODO: redraw items if selection changed
 }
 
 void reflow_loop() {
 	unsigned long current_time = millis();
-	// TODO: incorporate calibration data. turn off at lag degrees, for
-	// lag seconds?
 	switch (reflow_state) {
 		case PREHEAT:
-			set_elements_state(true);
-			if (current_temp > 12) {
+			if (current_temp > preheat_temp) {
 				reflow_state = SOAK;
+				reflow_state_start_time = current_time;
+				return;
 			}
 			break;
 		case SOAK:
+			if (current_time - reflow_state_start_time > soak_duration) {
+				reflow_state = REFLOW;
+				reflow_state_start_time = current_time;
+				return;
+			}
 			break;
 		case REFLOW:
+			if (current_time - reflow_state_start_time > reflow_duration
+					&& current_temp >= reflow_temp - calibration_lag_degrees) {
+				reflow_state = COOL;
+				reflow_state_start_time = current_time;
+				return;
+			}
 			break;
 		case COOL:
-			set_elements_state(false);
-			if (current_temp < 12) {
+			if (current_temp < 150) {
 				next_state = FINISHED_BAKE;
+				return;
 			}
 			break;
 	}
+
+	unsigned long time_in_state = current_time - reflow_state_start_time;
+	int desired_temp = get_desired_temperature(reflow_state, time_in_state);
 
 	if (desired_temp - current_temp < calibration_lag_degrees && holding_at_time == -1) {
 		// We are within lag_temp of the temperature we should be aiming for.
@@ -646,6 +779,9 @@ void top_left_pushed() {
 	if (read_debounced(BUTTON_TOP_LEFT)) return;
 	switch (current_state) {
 		case MAIN_MENU:
+			if (selection == 0) {
+				next_state = PICK_PROFILE;
+			}
 			if (selection == 1) {
 				next_state = CALIBRATE_1;
 			}
@@ -714,8 +850,7 @@ void change_state(State new_state) {
 			main_menu_setup();
 			break;
 		case PICK_PROFILE:
-			// TODO.
-			num_items = 1;
+			bake_setup();
 			break;
 		case CALIBRATE_1:
 			calibrate_1_setup();
@@ -911,6 +1046,21 @@ void loop1() {
 			core1_display.setTextSize(message.config.textSize);
 			core1_display.setTextColor(message.config.textColor);
 			core1_display.setFont(message.config.font);
+			break;
+		case DrawMessage::LINE:
+			core1_display.drawLine(
+					message.line.x0,
+					message.line.y0,
+					message.line.x1,
+					message.line.y1,
+					message.line.color);
+			break;
+		case DrawMessage::PIXEL:
+			core1_display.drawPixel(
+					message.pixel.x,
+					message.pixel.y,
+					message.pixel.color);
+			break;
 		default:
 			break;
 	}
